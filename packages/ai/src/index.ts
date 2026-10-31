@@ -417,16 +417,20 @@ export {
   AIError,
 } from "./schema/index.js"
 export type {
+  BaseRequest,
   GenerationOptionsFields,
   GenerationOptionsInput,
   LanguageModelInput,
   LanguageModelProviderOptions,
+  RequestTimeout,
   LLMRequest,
+  TimeoutConfig,
   ToolDefinitionInput,
   ToolNamespaceInput,
   ToolNamespaceEntryInput,
   ToolEntryInput,
   UsageInput,
+  WireHttpOptions,
 } from "./schema/index.js"
 export { ImageAspectRatio, ImageEvent, ImageModel, ImageModelSchema, ImageResponse } from "./image.js"
 export type {

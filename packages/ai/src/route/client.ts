@@ -34,6 +34,9 @@ import {
   mergeGenerationOptions,
   mergeHttpOptions,
   mergeProviderOptions,
+  requestHttpOptions,
+  transportFields,
+  BaseRequestTransport,
   withPartial,
 } from "../schema/index.js"
 
@@ -292,7 +295,7 @@ const resolveRequestOptions = (request: LLMRequest): LLMRequest => {
       modelDefaults?.providerOptions,
       normalized.providerOptions,
     ),
-    http: mergeHttpOptions(routeDefaults.http, modelDefaults?.http, normalized.http),
+    ...transportFields(mergeHttpOptions(routeDefaults.http, modelDefaults?.http, requestHttpOptions(normalized))),
   }
 }
 
@@ -446,7 +449,7 @@ function makeFromTransport<Body, Prepared, Frame, Event, State>(
           endpoint: routeInput.endpoint,
           auth: routeInput.auth ?? Auth.none,
           encodeBody: ProviderShared.encodeJson,
-          middleware: options?.http,
+          middleware: RequestExecutor.withFetch(request.fetch, options?.http),
           webSocket: options?.webSocket,
         }),
       streamPrepared: (prepared: Prepared, request: LLMRequest, runtime: TransportRuntime, options?: StreamOptions) => {
@@ -595,9 +598,7 @@ const prepareRequest = (request: LLMRequest): LLMRequest => {
     applyEffortUpdates({ ...sanitized, tools: ToolSchemaProjection.tools(dedupe(sanitized.tools), sanitized.model) }),
   )
   const headers = resolved.model.route.headers?.({ request: resolved })
-  return headers === undefined
-    ? resolved
-    : { ...resolved, http: mergeHttpOptions(new HttpOptions({ headers }), resolved.http) }
+  return headers === undefined ? resolved : { ...resolved, headers: { ...headers, ...resolved.headers } }
 }
 
 // Sanitizing copies changed class instances into plain records; rebuild them so protocols see the canonical classes.
@@ -607,8 +608,16 @@ const restoreClasses = (request: LLMRequest): LLMRequest => ({
   tools: request.tools.map(ToolEntry.make),
   toolChoice: request.toolChoice === undefined ? undefined : ToolChoice.make(request.toolChoice),
   generation: request.generation === undefined ? undefined : GenerationOptions.make(request.generation),
-  http: HttpOptions.make(request.http),
 })
+
+const validateTransport = Schema.decodeUnknownEffect(BaseRequestTransport)
+
+// Requests are plain objects, so their transport fields are checked when they run rather than when they are built.
+const checkTransport = (request: LLMRequest) =>
+  validateTransport(request).pipe(
+    Effect.mapError((error) => ProviderShared.invalidRequest(error.message, error)),
+    Effect.asVoid,
+  )
 
 const compile = Effect.fn("LLM.compile")(function* (request: LLMRequest, options?: StreamOptions) {
   const references = request.messages.flatMap((message) =>
@@ -625,6 +634,7 @@ const compile = Effect.fn("LLM.compile")(function* (request: LLMRequest, options
     return yield* ProviderShared.invalidRequest(
       "Local file references must be read with Media.file(path) before sending",
     )
+  yield* checkTransport(request)
   const resolved = prepareRequest(request)
   const route = resolved.model.route
 
@@ -717,13 +727,15 @@ export const layer: Layer.Layer<Service, never, RequestExecutor.Service> = Layer
       options?: EndpointCompactOptions,
     ): Effect.Effect<CompactionResponse, AIError>
     function compact(request: LLMRequest, options?: EndpointCompactOptions | TriggerCompactOptions) {
-      return Effect.suspend((): Effect.Effect<CompactionResponse | CompactionCheckpointResponse, AIError> => {
-        if (options?.mechanism === "trigger" && canCompact(request, options))
-          return request.model.route.compact.trigger(prepareRequest(request), executor, options)
-        if ((options?.mechanism === undefined || options.mechanism === "endpoint") && canCompact(request))
-          return request.model.route.compact.endpoint(prepareRequest(request), executor, options)
-        return unsupportedCompaction(request.model, options?.mechanism)
-      })
+      return checkTransport(request).pipe(
+        Effect.andThen((): Effect.Effect<CompactionResponse | CompactionCheckpointResponse, AIError> => {
+          if (options?.mechanism === "trigger" && canCompact(request, options))
+            return request.model.route.compact.trigger(prepareRequest(request), executor, options)
+          if ((options?.mechanism === undefined || options.mechanism === "endpoint") && canCompact(request))
+            return request.model.route.compact.endpoint(prepareRequest(request), executor, options)
+          return unsupportedCompaction(request.model, options?.mechanism)
+        }),
+      )
     }
     return Service.of({
       stream,
